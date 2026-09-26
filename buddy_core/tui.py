@@ -246,7 +246,7 @@ def ui_banner(cfg: dict, where: str, n_mcp: int) -> None:
 # ---- original buddy.py lines 371-374 ----------------------------------
 _CHAT_COMMANDS = ("/new", "/clear", "/mode", "/effort", "/model", "/tools", "/acp", "/service",
                   "/web", "/introspect",
-                  "/memory", "/forget", "/jobs", "/inbox",
+                  "/memory", "/forget", "/jobs", "/inbox", "/quota",
                   "/playbook", "/skills", "/evolve", "/fix", "/upgrade",
                   "/theme", "/wish", "/mic", "/image", "/say", "/yolo", "/help",
                   "/status", "/quit", "/exit")

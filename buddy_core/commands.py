@@ -597,6 +597,13 @@ def run_slash_command(cfg: dict, raw: str, confirm=None) -> str:
             except OSError:
                 pass
         rows.append(f"inbox: {inbox_n} entries")
+        try:
+            from .quota import report as _quota_report
+            q = _quota_report(cfg)
+            if not q.startswith("(no quota"):
+                rows.append("quota:\n  " + "\n  ".join(q.splitlines()))
+        except Exception:
+            pass
         err = HOME / "errors.log"
         if err.exists() and err.stat().st_size > 0:
             try:
@@ -614,6 +621,11 @@ def run_slash_command(cfg: dict, raw: str, confirm=None) -> str:
         except Exception:
             pass
         return "\n".join(rows)
+    if cmd == "/quota":
+        # Latest known rate-limit/quota state per connected API. Read-only
+        # and offline — safe on the unattended path.
+        from .quota import report as _quota_report
+        return _quota_report(cfg)
     if cmd == "/memory":
         return recall_memory()
     if cmd == "/inbox":

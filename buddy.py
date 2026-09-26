@@ -99,6 +99,11 @@ def main() -> None:
             m.shutdown()
     elif cmd == "jobs":
         print(list_jobs())
+    elif cmd == "quota":
+        HOME.mkdir(parents=True, exist_ok=True)
+        from buddy_core.config import load_config
+        from buddy_core.quota import report as _quota_report
+        print(_quota_report(load_config()))
     elif cmd == "oauth" and rest:
         HOME.mkdir(parents=True, exist_ok=True)
         cmd_oauth(rest[0])

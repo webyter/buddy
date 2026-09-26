@@ -297,6 +297,12 @@ def _completion(cfg: dict, messages: list, tools: list | None, stream: bool = Fa
                 detail = e.read().decode(errors="replace")
             finally:
                 e.close()
+            if e.code == 429:  # quota died: remember which bucket and reset
+                try:
+                    from .quota import record_429
+                    record_429(api_base, model, detail)
+                except Exception:
+                    pass
             raise RuntimeError(_api_err(e.code, detail))
         try:
             resp = json.loads(raw)
@@ -304,6 +310,11 @@ def _completion(cfg: dict, messages: list, tools: list | None, stream: bool = Fa
                 raise ValueError("no choices")
         except (json.JSONDecodeError, ValueError, TypeError):
             raise RuntimeError(f"malformed API response: {str(raw)[:200]}")
+        try:  # rate-limit headers: the only quota visibility these APIs give
+            from .quota import record_headers
+            record_headers(api_base, model, getattr(r, "headers", None))
+        except Exception:
+            pass
         return resp
 
     # --- SSE streaming with tool-call delta accumulation ---
@@ -377,6 +388,11 @@ def _completion(cfg: dict, messages: list, tools: list | None, stream: bool = Fa
     deadline = time.monotonic() + budget
     try:
         with urllib.request.urlopen(req, timeout=300) as r:
+            try:  # rate-limit headers arrive once, with the stream open
+                from .quota import record_headers
+                record_headers(api_base, model, getattr(r, "headers", None))
+            except Exception:
+                pass
             event_lines: list[str] = []
             for raw in r:
                 if time.monotonic() > deadline:
