@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "buddy-assistant"
+version = "4.2.0"
+description = "Zero-dependency personal AI assistant for Linux: guard-gated tools, persistent memory, MCP, self-training skills, 24/7 daemon + Antigravity TUI + web UI"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "webyter" }]
+requires-python = ">=3.10"
+# stdlib only, by design — an empty dependency list IS the feature
+dependencies = []
+keywords = ["assistant", "agent", "cli", "tui", "mcp", "linux", "offline"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/webyter/buddy"
+Issues = "https://github.com/webyter/buddy/issues"
+
+[project.scripts]
+buddy = "buddy:main"
+
+[tool.setuptools]
+py-modules = ["buddy"]
+packages = ["buddy_core"]
