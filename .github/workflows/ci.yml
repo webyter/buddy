@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # Hermetic: no stored API key — the suite stubs what it needs
+      # (see tests/test_regressions.py TestModelFailover.setUp).
+      - name: Run test suite
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v
+      - name: Syntax check (every module must compile)
+        run: python3 -m py_compile buddy.py buddy_core/*.py
+
+  smoke:
+    # Fresh-clone production check: no config, no key, no venv — the first
+    # thing a new user does must work (offline mode bootstraps its own config).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: --help works on a bare clone
+        run: python3 buddy.py --help | grep -q buddy
+      - name: Package imports cleanly
+        run: python3 -c "import buddy; import buddy_core.commands, buddy_core.webui, buddy_core.sched"
+      - name: Doctor self-check (offline, no config)
+        run: python3 buddy.py doctor | tail -20
+      - name: Wheel builds
+        run: |
+          python3 -m pip install --upgrade build
+          python3 -m build --wheel
