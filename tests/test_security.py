@@ -59,6 +59,20 @@ class TestModelConfigGate(unittest.TestCase):
     prompt-injected brain could point buddy at its own endpoint, where
     api_key_for's fallback hands over the shared API key."""
 
+    def setUp(self):
+        # /model add persists via _save_config() on the interactive path —
+        # without this patch the suite rewrote the user's REAL
+        # ~/.buddy/config.json (repro: suite run flipped api_base to deepseek).
+        import tempfile
+        from buddy_core import config as cfg_mod
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        p = Path(td.name) / "config.json"
+        p.write_text("{}")
+        patcher = mock.patch.object(cfg_mod, "CONFIG", p)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _cfg(self):
         return {"api_base": "https://generativelanguage.googleapis.com/v1beta/openai",
                 "model": "gemini-3.8-flash", "models": {}}
