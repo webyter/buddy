@@ -10,6 +10,7 @@ from __future__ import annotations
 from .config import DEFAULT_API_BASE, DEFAULT_MODEL, api_key_for
 
 import json
+import os
 try:
     import readline  # type: ignore
 except ImportError:  # exotic platforms — chat() falls back to plain input()
@@ -66,29 +67,8 @@ def _headers(cfg: dict, model: str = "", base: str = "") -> dict:
 
 
 # ---- original buddy.py lines 1855-1940 --------------------------------
-def _cli_completion(cfg: dict, messages: list, tools: list | None,
-                    stream: bool = False):
-    """Brain-by-sign-in: run the conversation through a locally authenticated
-    CLI (codex = ChatGPT login, claude = Claude subscription, gemini = Google
-    login) instead of an OpenAI-compatible API. Tool calls travel as a
-    TOOLCALL: line; final answers as FINAL: ..."""
-    brain = cfg.get("brain", "api")
-    if brain == "codex":
-        # read-only: the CLI must NOT execute anything itself (a prompt-
-        # injected page would become arbitrary shell); buddy's guarded tool
-        # loop does the executing. Override via config "codex_sandbox".
-        argv = ["codex", "exec",
-                "--sandbox", str(cfg.get("codex_sandbox", "read-only")),
-                "--skip-git-repo-check"]
-    elif brain == "claude":
-        argv = ["claude", "-p"]
-    elif brain == "gemini":
-        argv = ["gemini", "-p"]
-    elif brain == "agy":
-        argv = ["agy", "-p"]
-    else:
-        raise ValueError(  # was: return None → TypeError killed every turn
-            f"unknown brain {brain!r} — use api, codex, claude, gemini or agy")
+def _tool_catalog(messages: list, tools: list | None) -> str:
+    """Render the tool catalog for the decision-engine prompt."""
     catalog_lines = []
     for t in (tools or []):
         if isinstance(t, dict):
@@ -100,7 +80,10 @@ def _cli_completion(cfg: dict, messages: list, tools: list | None,
             # legacy [name, description, params] form
             catalog_lines.append(
                 f"- {t[0]}: {t[1]} (params: {json.dumps(t[2])})")
-    catalog = "\n".join(catalog_lines)
+    return "\n".join(catalog_lines)
+
+
+def _render_convo(messages: list) -> str:
     convo = []
     for m in messages:
         role = m.get("role")
@@ -124,6 +107,15 @@ def _cli_completion(cfg: dict, messages: list, tools: list | None,
             convo.append(f"[you (called tools: {calls})]\n{body}".strip())
         elif role == "tool":
             convo.append(f"[tool result]\n{str(m.get('content'))[:4000]}")
+    return "\n\n".join(convo)
+
+
+def _decision_prompt(messages: list, tools: list | None) -> str:
+    """Shared DECISION-ENGINE prompt for the non-API brains (CLI + ACP):
+    the model never executes anything itself, it only emits TOOLCALL/FINAL
+    and buddy's guarded tool loop does the executing."""
+    catalog = _tool_catalog(messages, tools)
+    convo = _render_convo(messages)
     prompt = (
         "\n\n".join(convo)
         + "\n\nTOOLS you may use:\n" + (catalog or "(none)")
@@ -136,21 +128,13 @@ def _cli_completion(cfg: dict, messages: list, tools: list | None,
     if len(prompt) > 8000:  # argv-overflow protection: keep BOTH ends — the
         # instructions at the top and the RESPONSE PROTOCOL at the bottom
         prompt = prompt[:4500] + "\n…[conversation truncated]…" + prompt[-3400:]
-    try:
-        p = subprocess.run(argv + [prompt], capture_output=True, text=True,
-                           timeout=600, stdin=subprocess.DEVNULL)
-    except FileNotFoundError:
-        return {"choices": [{"message": {"role": "assistant", "content":
-            f"(brain '{brain}' needs the {brain} CLI installed and signed in — "
-            f"e.g. `npm install -g @openai/codex && codex login --device-auth`)"
-            }}]}
-    except subprocess.TimeoutExpired:
-        return {"choices": [{"message": {"role": "assistant", "content":
-            f"(brain '{brain}' timed out after 600s — try again or use a lighter task)"
-            }}]}
-    out = (p.stdout or "").strip()
-    # last line wins: the protocol line is the model's final word. CLIs love
-    # wrapping it in fences (```TOOLCALL: {...}```) — peel those first.
+    return prompt
+
+
+def _parse_protocol(out: str, brain: str) -> dict | None:
+    """Parse the TOOLCALL:/FINAL: protocol line from a non-API brain reply.
+    Last line wins; fences (```TOOLCALL: …```) are peeled first. Returns the
+    OpenAI-style response dict, or None when no protocol line was found."""
     for raw in reversed(out.splitlines()):
         line = raw.strip()
         if line.startswith("```"):
@@ -170,6 +154,49 @@ def _cli_completion(cfg: dict, messages: list, tools: list | None,
             # no raw print here — chat() renders the returned answer via md_print
             return {"choices": [{"message": {"role": "assistant",
                                              "content": answer}}]}
+    return None
+
+
+def _cli_completion(cfg: dict, messages: list, tools: list | None,
+                    stream: bool = False):
+    """Brain-by-sign-in: run the conversation through a locally authenticated
+    CLI (codex = ChatGPT login, claude = Claude subscription, gemini = Google
+    login) instead of an OpenAI-compatible API. Tool calls travel as a
+    TOOLCALL: line; final answers as FINAL: ..."""
+    brain = cfg.get("brain", "api")
+    prompt = _decision_prompt(messages, tools)
+    if brain == "codex":
+        # read-only: the CLI must NOT execute anything itself (a prompt-
+        # injected page would become arbitrary shell); buddy's guarded tool
+        # loop does the executing. Override via config "codex_sandbox".
+        argv = ["codex", "exec",
+                "--sandbox", str(cfg.get("codex_sandbox", "read-only")),
+                "--skip-git-repo-check"]
+    elif brain == "claude":
+        argv = ["claude", "-p"]
+    elif brain == "gemini":
+        argv = ["gemini", "-p"]
+    elif brain == "agy":
+        argv = ["agy", "-p"]
+    else:
+        raise ValueError(  # was: return None → TypeError killed every turn
+            f"unknown brain {brain!r} — use api, codex, claude, gemini, agy or acp")
+    try:
+        p = subprocess.run(argv + [prompt], capture_output=True, text=True,
+                           timeout=600, stdin=subprocess.DEVNULL)
+    except FileNotFoundError:
+        return {"choices": [{"message": {"role": "assistant", "content":
+            f"(brain '{brain}' needs the {brain} CLI installed and signed in — "
+            f"e.g. `npm install -g @openai/codex && codex login --device-auth`)"
+            }}]}
+    except subprocess.TimeoutExpired:
+        return {"choices": [{"message": {"role": "assistant", "content":
+            f"(brain '{brain}' timed out after 600s — try again or use a lighter task)"
+            }}]}
+    out = (p.stdout or "").strip()
+    parsed = _parse_protocol(out, brain)
+    if parsed is not None:
+        return parsed
     if not out:
         err = (p.stderr or "").strip()[-500:]
         code = p.returncode
@@ -179,6 +206,53 @@ def _cli_completion(cfg: dict, messages: list, tools: list | None,
     fallback = out[-4000:]
     # no raw print even in stream mode — chat() renders the returned answer
     return {"choices": [{"message": {"role": "assistant", "content": fallback}}]}
+
+
+def _acp_completion(cfg: dict, messages: list, tools: list | None,
+                    stream: bool = False):
+    """Brain-by-ACP: run the decision-engine conversation through buddy's own
+    ACP client (buddy_core.acp) — a coding agent that speaks Agent Client
+    Protocol over stdio (claude-agent-acp, codex-acp, …). No API key needed:
+    the agent is authenticated by its own sign-in (e.g. CLAUDE_CODE_OAUTH_TOKEN
+    for claude-agent-acp, inherited from buddy's environment).
+
+    Config:
+      "brain": "acp",
+      "acp_agents": {"claude": {"command": "claude-agent-acp", "args": []}},
+      "acp_brain": "claude"        # which agent drives the brain (default: claude)
+    """
+    from .acp import ACPError, PROMPT_TIMEOUT, run_acp_agent  # lazy: no cycle
+    agents = cfg.get("acp_agents") or {}
+    name = str(cfg.get("acp_brain") or "claude")
+    entry = agents.get(name)
+    if not isinstance(entry, dict) or not entry.get("command"):
+        if not agents:
+            hint = ("(brain 'acp' has no agents configured — add config "
+                    "\"acp_agents\": {\"claude\": {\"command\": "
+                    "\"claude-agent-acp\", \"args\": []}})")
+        else:
+            hint = f"(brain 'acp': no agent named '{name}' in acp_agents — have: {', '.join(agents)})"
+        return {"choices": [{"message": {"role": "assistant", "content": hint}}]}
+    prompt = _decision_prompt(messages, tools)
+    try:
+        out = run_acp_agent(str(entry["command"]),
+                            list(entry.get("args") or []),
+                            prompt, cwd=cfg.get("cwd") or os.getcwd(),
+                            timeout=PROMPT_TIMEOUT)
+    except ACPError as e:
+        return {"choices": [{"message": {"role": "assistant", "content":
+            f"(ACP brain '{name}' failed: {e})"}}]}
+    except FileNotFoundError:
+        return {"choices": [{"message": {"role": "assistant", "content":
+            f"(ACP brain '{name}': agent binary '{entry['command']}' not found "
+            f"on PATH — install it or point acp_agents at another agent)"}}]}
+    parsed = _parse_protocol(out, "acp")
+    if parsed is not None:
+        return parsed
+    # The agent's final transcript carries no protocol line (it answered in
+    # prose) — surface its own words instead of inventing an error.
+    return {"choices": [{"message": {"role": "assistant",
+                                     "content": out[-4000:]}}]}
 
 # ---- original buddy.py lines 1941-1942 --------------------------------
 
@@ -192,6 +266,8 @@ def _completion(cfg: dict, messages: list, tools: list | None, stream: bool = Fa
     `model`/`base`: one-turn overrides used by the rate-limit failover (a
     retry may cross API bases, e.g. quota-dead Gemini -> local ollama), so
     a retry never mutates the user's configured model."""
+    if cfg.get("brain", "api") == "acp":  # sign-in brain via buddy's ACP client
+        return _acp_completion(cfg, messages, tools, stream)
     if cfg.get("brain", "api") != "api":  # sign-in brain (codex/claude/gemini CLI)
         return _cli_completion(cfg, messages, tools, stream)
     # Snapshot: cfg is ONE long-lived dict shared by every daemon thread,

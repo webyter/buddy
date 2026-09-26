@@ -1029,6 +1029,8 @@ def cmd_upgrade(rest: list[str]) -> None:
 # ---- original buddy.py lines 4625-4641 --------------------------------
 def _api_check(cfg: dict) -> str:
     """Try GET /models; return status string."""
+    if cfg.get("brain", "api") != "api":
+        return f"n/a — brain is '{cfg['brain']}' (no API key needed)"
     base = (cfg.get("api_base") or "").rstrip("/")
     if not base:
         return "no api_base configured"
@@ -1190,7 +1192,14 @@ def doctor() -> None:
             pass
     else:
         import shutil as _sh
-        checks.append((f"brain CLI ({cfg['brain']})", bool(_sh.which(cfg["brain"]))))
+        if cfg.get("brain") == "acp":
+            agents = cfg.get("acp_agents") or {}
+            entry = agents.get(str(cfg.get("acp_brain") or "claude")) or {}
+            cmd = str(entry.get("command") or "")
+            checks.append((f"ACP brain agent ({cmd or 'not configured'})",
+                           bool(cmd) and bool(_sh.which(cmd))))
+        else:
+            checks.append((f"brain CLI ({cfg['brain']})", bool(_sh.which(cfg["brain"]))))
     info = probe_system()
     tools = info.get("tools", {})
     checks.append(("voice playback (mpv/ffplay)", any(tools.get(t) for t in ("mpv", "ffplay"))))
