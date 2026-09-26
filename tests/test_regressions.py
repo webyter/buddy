@@ -1178,11 +1178,12 @@ class TestModelFailover(unittest.TestCase):
         # no stored key for deepseek → candidate is skipped (failover may
         # still pick a same-base model, but never the keyless provider)
         with mock.patch("buddy_core.config.secret_get", return_value=""):
-            alt = _failover_model(deep, self.OVERLOAD)
+            alt = _failover_model(deep, self.PER_MODEL)
             self.assertNotEqual(alt, "deepseek-chat")
-        # with its own key stored → legitimate failover target
+        # with its own key stored → legitimate failover target (429 allows
+        # crossing API bases)
         with mock.patch("buddy_core.config.secret_get", return_value="sk-deep"):
-            self.assertEqual(_failover_model(deep, self.OVERLOAD),
+            self.assertEqual(_failover_model(deep, self.PER_MODEL),
                              "deepseek-chat")
 
     def test_never_fails_over_on_auth_or_missing_model(self):
