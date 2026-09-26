@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+workspace/
+scratch/
+*.log
+*.tmp
+*.bak
+*~
+backups/
+workspace/site/
+.coverage/
+htmlcov/
+# packaging artifacts (python3 -m build / pip wheel)
+build/
+dist/
+*.egg-info/
