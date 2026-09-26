@@ -1169,6 +1169,22 @@ class TestModelFailover(unittest.TestCase):
             "api_base": "http://127.0.0.1:11434/v1", "model": "llama3.2:1b"}})
         self.assertEqual(_failover_model(cross, self.QUOTA), "llama3.2:1b")
 
+    def test_cross_provider_failover_needs_its_own_key(self):
+        # A cross-provider candidate without its own key would get the main
+        # provider's key — a guaranteed 401 from a host that never saw it.
+        from buddy_core.agent import _failover_model
+        deep = self._cfg(models={"deep": {
+            "api_base": "https://api.deepseek.com/v1", "model": "deepseek-chat"}})
+        # no stored key for deepseek → candidate is skipped (failover may
+        # still pick a same-base model, but never the keyless provider)
+        with mock.patch("buddy_core.config.secret_get", return_value=""):
+            alt = _failover_model(deep, self.OVERLOAD)
+            self.assertNotEqual(alt, "deepseek-chat")
+        # with its own key stored → legitimate failover target
+        with mock.patch("buddy_core.config.secret_get", return_value="sk-deep"):
+            self.assertEqual(_failover_model(deep, self.OVERLOAD),
+                             "deepseek-chat")
+
     def test_never_fails_over_on_auth_or_missing_model(self):
         from buddy_core.agent import _failover_model
         for err in ("API error 401: bad key", "API error 403",

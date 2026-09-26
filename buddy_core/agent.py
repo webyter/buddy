@@ -858,6 +858,17 @@ def _failover_model(cfg: dict, err_msg: str) -> str | None:
         mbase = str(info.get("api_base") or "").rstrip("/")
         same = (not mbase or not base or mbase == base)
         if m and m != current and (same or cross_base_ok):
+            if not same:
+                # cross-provider retry is only useful if that provider has
+                # its OWN key — falling back to the shared main key just
+                # buys a guaranteed 401 from a host that never saw it.
+                # Keyless local endpoints (ollama on loopback) are exempt.
+                local = mbase.startswith(("http://127.0.0.1", "http://localhost",
+                                          "http://[::1]"))
+                if not local:
+                    from .config import provider_key_name, secret_get
+                    if not secret_get(provider_key_name(cfg, m, mbase)):
+                        continue
             explicit.append((m, mbase))
     # on rate/quota errors prefer a different base (a same-base retry with
     # an exhausted key just 429s again)
