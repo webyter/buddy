@@ -72,8 +72,26 @@ open https://...
 ```
 
 Type `help` in any chat for the live list. Failover: on 429/quota errors buddy
-retries the turn on another registered model (`buddy.py model add`); offline
-tasks above always answer directly.
+retries the turn on another registered model (`buddy.py model add`) — a
+different provider is only tried when it has its own key stored (keyless
+local endpoints like ollama on loopback are exempt). Offline tasks above
+always answer directly.
+
+### Brains (no API key required)
+
+`config.json` `"brain"` picks the backend: `"api"` (default, OpenAI-compatible
+key), `"codex"` / `"claude"` / `"gemini"` / `"agy"` (a signed-in CLI), or
+`"acp"` — a coding agent over Agent Client Protocol via buddy's own ACP
+client:
+
+```json
+{ "brain": "acp",
+  "acp_agents": { "claude": { "command": "claude-agent-acp", "args": [] } },
+  "acp_brain": "claude" }
+```
+
+The agent is a decision engine only: it emits `TOOLCALL:`/`FINAL:` lines and
+buddy's guarded tool loop does the executing.
 
 ## CLI Usage
 
@@ -141,6 +159,7 @@ Buddy's terminal interface is modeled after the Google Antigravity (`agy`) CLI:
 | `/yolo` | Toggle command confirmations on/off |
 | `/help` | List chat commands |
 | `/status` | Full health view: brain/model/mode, memory, jobs, watchers, inbox, errors, disk |
+| `/quota` | Rate limits/quota left per connected API (learned from response headers and 429 bodies) |
 | `/quit` / `/exit` | Exit Buddy |
 
 ### Direct Shell Execution & Offline Mode

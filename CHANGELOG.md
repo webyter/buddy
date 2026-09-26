@@ -2,6 +2,25 @@
 
 All notable changes. Format based on Keep a Changelog; versions are tags.
 
+## [4.3.0] — 2026-09-26
+### Added
+- **`brain: "acp"`** — run the whole decision-engine through buddy's own ACP
+  client (`claude-agent-acp`, `codex-acp`, …): no API key needed, the coding
+  agent's own sign-in is the credential. TOOLCALL/FINAL protocol and prompt
+  building shared between CLI and ACP brains
+- **`/quota`** — what's left on each connected API. No quota API exists, so
+  buddy harvests rate-limit headers from every live response and parses 429
+  quota bodies (Google's OpenAI-compat endpoint wraps the error in an array);
+  state persists in `~/.buddy/quota.json`. Also visible in `/status` and
+  `buddy.py quota`
+- First live self-evolution cycle: buddy wrote its own operational playbook
+  (`~/.buddy/playbook.md`)
+### Fixed
+- Test isolation: the suite's `/model add` test rewrote the user's REAL
+  `~/.buddy/config.json` (suite runs silently switched providers)
+- Cross-provider failover no longer sends the shared main key to a foreign
+  endpoint (guaranteed 401); loopback endpoints (ollama) stay keyless-exempt
+
 ## [4.2.0] — 2026-09-26
 ### Added
 - Proper packaging: `pip install git+https://github.com/webyter/buddy` installs
