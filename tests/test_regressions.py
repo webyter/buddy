@@ -412,8 +412,14 @@ class TestAutoUpgradeAndSelfRepair(unittest.TestCase):
         # Hermetic: skip self_repair's inner suite run (slow, machine-
         # speed dependent) — syntax + error-log scans still run.
         with mock.patch.dict(os.environ, {"BUDDY_TESTING_SELF_REPAIR": "1"}):
+            # unattended: refused — a repair cycle spawns the test runner and
+            # rewrites buddy's own source, and the 600s cooldown is bypassed by
+            # passing any `issue`, so the model could force one per tool call
             res = self_repair(cfg)
-        self.assertIn("healthy and bug-free", res)
+            self.assertIn("needs a human", res)
+            # human present: still works
+            res_ok = self_repair(cfg, confirm=lambda _a: True)
+        self.assertIn("healthy and bug-free", res_ok)
 
     def test_tools_specs(self):
         from buddy_core.tools import all_tool_specs
@@ -432,9 +438,17 @@ class TestAutoUpgradeAndSelfRepair(unittest.TestCase):
         from unittest import mock
         from buddy_core.commands import run_slash_command
         cfg = {}
+        # /fix used to run unattended here (this test asserted its output), which
+        # meant a repair cycle — which spawns the test runner and rewrites
+        # buddy's own source — was reachable from the model with confirm=None.
+        # It is now refused on the unattended path; this pins that.
         with mock.patch.dict(os.environ, {"BUDDY_TESTING_SELF_REPAIR": "1"}):
             res_fix = run_slash_command(cfg, "/fix")
-        self.assertIn("healthy and bug-free", res_fix)
+        self.assertIn("needs a human", res_fix)
+        # ...and still works when a human is present to confirm it
+        with mock.patch.dict(os.environ, {"BUDDY_TESTING_SELF_REPAIR": "1"}):
+            res_fix_ok = run_slash_command(cfg, "/fix", confirm=lambda _a: True)
+        self.assertIn("healthy and bug-free", res_fix_ok)
         res_help = run_slash_command(cfg, "/help")
         self.assertIn("commands:", res_help)
         res_tools = run_slash_command(cfg, "/tools")
@@ -661,10 +675,15 @@ class TestTUICopy(unittest.TestCase):
                 msg = d._to_clipboard("copy-me-text")
                 # the native-tool copy now runs in a background thread (it
                 # used to freeze the display lock for ~10s) — wait for it
+                # Poll for existence AND content, not just existence: the copy
+                # runs in a background thread, so the file appears the moment
+                # open(mode='w') truncates it — reading then raced the write and
+                # failed intermittently ('' != 'copy-me-text'), roughly 1 run in 8.
                 deadline = time.time() + 5
                 files = []
                 while time.time() < deadline:
-                    files = list(Path(td).glob("copies/*.txt"))
+                    files = [f for f in Path(td).glob("copies/*.txt")
+                             if f.read_text() == "copy-me-text"]
                     if files:
                         break
                     time.sleep(0.05)

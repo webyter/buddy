@@ -2,7 +2,7 @@
 
 All notable changes. Format based on Keep a Changelog; versions are tags.
 
-## [Unreleased]
+## [4.3.1] — 2026-09-26
 ### Security
 - **Fixed: arbitrary command execution from the model (no confirmation).**
   `run_slash_command` gated the unattended (`confirm=None`) path with a

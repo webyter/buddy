@@ -45,6 +45,28 @@ from datetime import datetime, timedelta
 # are dropped past that.
 MAX_FACT_LINES = 4000
 
+# Byte ceiling for MEMORY.md. _memory_context() reads and splits the whole file
+# on every system-prompt build, so it has to stay bounded in size as well as in
+# line count -- the line cap alone does not bound a few very large facts.
+MAX_MEMORY_BYTES = 512_000
+
+
+_FACT_RE = re.compile(r"- \[\d{4}-\d{2}-\d{2}\] ")
+
+
+def _fact_lines(lines: list[str]) -> list[int]:
+    """Indexes of dated fact bullets.
+
+    Deliberately simple: no block-boundary tracking. memory_compact's own
+    _is_block_end stops a digest block at the next heading *or* the next fact
+    line, so by the file's own convention a fact bullet is never nested inside a
+    "### session digest" block. An earlier attempt added heading-depth tracking
+    here to "protect" nested bullets; it classified every fact after the first
+    heading as nested and therefore dropped nothing at all, which is worse than
+    the edge case it tried to fix.
+    """
+    return [i for i, ln in enumerate(lines) if _FACT_RE.match(ln)]
+
 
 def _trim_facts_locked() -> None:
     """Keep MEMORY.md's fact list bounded. Caller must hold STATE_LOCK."""
@@ -53,15 +75,28 @@ def _trim_facts_locked() -> None:
             return
         raw = MEMORY.read_text(encoding="utf-8", errors="replace")
         lines = raw.splitlines(keepends=True)
-        # Only fact lines are dropped; headings and digest blocks are kept so
-        # memory_compact's structure survives.
-        fact_idx = [i for i, ln in enumerate(lines)
-                    if re.match(r"- \[\d{4}-\d{2}-\d{2}\] ", ln)]
-        if len(fact_idx) <= MAX_FACT_LINES and MEMORY.stat().st_size <= 512_000:
+        fact_idx = _fact_lines(lines)
+        over_lines = len(fact_idx) > MAX_FACT_LINES
+        over_bytes = len(raw) > MAX_MEMORY_BYTES
+        if not (over_lines or over_bytes):
             return
-        if len(fact_idx) <= MAX_FACT_LINES:
-            return  # over on bytes but under on lines: leave the structure be
-        drop = set(fact_idx[:len(fact_idx) - MAX_FACT_LINES])
+        if not over_lines:
+            # Over on bytes but under the line cap: drop the oldest facts until
+            # back under budget. (This branch used to be unreachable -- both
+            # guards returned when under MAX_FACT_LINES -- so a MEMORY.md of a
+            # few very large facts still grew without bound.)
+            budget = len(raw) - MAX_MEMORY_BYTES
+            drop: set[int] = set()
+            freed = 0
+            for i in fact_idx:
+                if freed >= budget:
+                    break
+                drop.add(i)
+                freed += len(lines[i])
+        else:
+            drop = set(fact_idx[:len(fact_idx) - MAX_FACT_LINES])
+        if not drop:
+            return
         out = "".join(ln for i, ln in enumerate(lines) if i not in drop)
         tmp = MEMORY.with_suffix(".md.tmp")
         tmp.write_text(out, encoding="utf-8")

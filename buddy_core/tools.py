@@ -91,7 +91,13 @@ _CRED_DIRS = frozenset({
     ".password-store", ".securio", ".vnc",
 })
 
-# Exact basenames that are credential files wherever they appear.
+# ~/.config/<tool>/ trees that hold tokens (matched at any depth).
+_CRED_TOOLS = frozenset({
+    "gh", "gcloud", "rclone", "op", "systemd", "keyring", "docker", "aws",
+    "azure", "kube", "vagrant", "doctl", "fly", "heroku", "pulumi",
+})
+
+# Exact basenames that are credential files, matched only under $HOME.
 _CRED_BASENAMES = frozenset({
     ".netrc", "_netrc", ".git-credentials", ".pypirc", ".npmrc", ".htpasswd",
     "rclone.conf", "credentials", "credentials.json",
@@ -154,12 +160,26 @@ def _sensitive_path_reason(path: Path) -> str | None:
         parts = []
     if any(p in _CRED_DIRS for p in parts):
         return f"credential store: {s}"
-    # tool configs that hold tokens live at ~/.config/<tool>/<file>
-    if (len(parts) >= 3 and parts[-3] == ".config"
-            and parts[-2] in ("gh", "gcloud", "rclone", "op", "systemd", "keyring")):
-        return f"credential store: {s}"
-    if parts and parts[-1] in _CRED_BASENAMES:
-        return f"credential file: {s}"
+    # Tool configs that hold tokens live under ~/.config/<tool>/** — scan for
+    # the pair at ANY depth, not just depth 1. The old positional parts[-3]
+    # check missed e.g. ~/.config/op/keys/secret.json and
+    # ~/.config/gcloud/configurations/config_sentinel while blocking the
+    # directory one level up: self-inconsistent.
+    if ".config" in parts:
+        for _i, _p in enumerate(parts):
+            if _p == ".config" and _i + 1 < len(parts) and parts[_i + 1] in _CRED_TOOLS:
+                return f"credential store: {s}"
+    # Basenames are matched only under $HOME. Matching them filesystem-wide
+    # flagged ordinary project files (myproj/credentials.json,
+    # app/firebase/credentials.json, docs/credentials) and made a committed
+    # service-account JSON unreadable without confirmation.
+    if home is not None and parts and parts[-1] in _CRED_BASENAMES:
+        try:
+            if rp.is_absolute() and rp.is_relative_to(home):
+                return f"credential file: {s}"
+        except (ValueError, OSError):
+            pass
+    return None
     return None
 
 # ---- original buddy.py lines 1643-1646 --------------------------------
@@ -339,6 +359,14 @@ def browse(url: str, wait_seconds: int = 3) -> str:
     url = _norm_url(url)
     if not url:
         return "(not a valid URL — give a domain like example.com or a full http(s) URL)"
+    # Check here, not only in web_fetch/_net_open: the Playwright branch below
+    # never calls either of them, so without this the SSRF guard was bypassed
+    # entirely once playwright was installed (page.goto straight to loopback,
+    # the LAN, or 169.254.169.254, with the rendered text returned to the model).
+    _why = _private_host_reason(urllib.parse.urlparse(url).hostname or "")
+    if _why:
+        return (f"(refused: {url} resolves to a non-public host ({_why}) — "
+                "buddy only browses public URLs)")
     try:
         from playwright.sync_api import sync_playwright  # type: ignore
     except ImportError:
@@ -492,8 +520,19 @@ def clipboard(action: str, text: str = "") -> str:
 
 
 # ---- original buddy.py lines 1833-1843 --------------------------------
-def open_url(target: str) -> str:
-    """Open a URL or file with the system handler."""
+def open_url(target: str, confirm=None) -> str:
+    """Open a URL or file with the system handler.
+
+    confirm-gated: this spawns `xdg-open` on a model-controlled argument, which
+    can open arbitrary local files and URLs in the user's browser. It had no
+    confirm and no blocklist, so it was a process-spawn primitive reachable
+    unattended (file:///... included).
+    """
+    if confirm is None:
+        return ("(opening a URL/file hands it to the system handler — that needs "
+                "a human. Ask the user to open it themselves.)")
+    if not confirm(f"open {target} with the system default handler"):
+        return "(cancelled by user)"
     try:
         p = subprocess.run(["xdg-open", target],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -1849,7 +1888,7 @@ def _tool_impl(name: str, args: dict, confirm=None) -> str:
     if name == "clipboard":
         return clipboard(args["action"], args.get("text", ""))
     if name == "open_url":
-        return open_url(args["target"])
+        return open_url(args["target"], confirm)
     if name == "remember":
         return remember(args["fact"])
     if name == "recall":
@@ -1878,6 +1917,20 @@ def _tool_impl(name: str, args: dict, confirm=None) -> str:
         return tasks_status()
     if name == "acp":
         from .acp import acp_tool
+        # Spawning an ACP agent runs a config-controlled command line
+        # (acp.py Popen([command] + args)) and the agent then drives its own
+        # tools — file writes, shell. The slash path is allowlisted, but the
+        # TOOL dispatch is a second door to the same primitive, and it was
+        # ungated: a prompt injection could drive any configured agent with no
+        # confirmation. Gating the brain would be wrong (brain.py calls
+        # run_acp_agent directly, not this dispatch), so gate here.
+        if confirm is None:
+            return ("(driving an ACP agent runs a subprocess and lets it use "
+                    "its own tools — that needs a human. Ask the user to run "
+                    "`acp <agent> <prompt>` themselves.)")
+        if not confirm(f"drive ACP agent {args.get('agent','')!r} with a prompt "
+                       "(it can edit files and run shell commands)"):
+            return "(cancelled by user)"
         return acp_tool(load_config(), args.get("agent", ""), args.get("prompt", ""),
                         args.get("cwd", ""))
     if name == "add_watcher":
@@ -1896,13 +1949,23 @@ def _tool_impl(name: str, args: dict, confirm=None) -> str:
     if name == "code_edit":
         return code_edit(args["target"], args["old_text"], args["new_text"], confirm)
     if name == "publish_site":
-        return publish_site(args["filename"], args["html"])
+        # keyword, not positional: this call site dropping `confirm` is exactly
+        # how the gate inside publish_site stayed dead code
+        return publish_site(args["filename"], args["html"], confirm=confirm)
     if name in ("self_update", "auto_upgrade"):
         return self_update(args.get("repo", ""), confirm)
     if name == "evolve":
         return evolve_pass(load_config(), __import__('buddy_core.agent', fromlist=['_sub_mcp'])._sub_mcp(), confirm)
     if name == "codex":
         from .agent import codex_run
+        # codex_run is subprocess.run(["codex", "exec", task]) — model-authored
+        # task text, no blocklist, no confirm. Same class as the acp tool.
+        if confirm is None:
+            return ("(codex runs a subprocess that edits files and runs shell "
+                    "commands — that needs a human. Ask the user to run it "
+                    "themselves.)")
+        if not confirm(f"run the codex coding agent on: {str(args.get('task',''))[:120]}"):
+            return "(cancelled by user)"
         return codex_run(args["task"], args.get("timeout", 900))
     if name == "self_repair":
         return self_repair(load_config(), __import__('buddy_core.agent', fromlist=['_sub_mcp'])._sub_mcp(), confirm, issue=str(args.get("issue", "")))

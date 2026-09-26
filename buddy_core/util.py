@@ -234,8 +234,13 @@ def claim_inbox() -> str:
         return ""
 
 
+# Match only our own trailer: the note is always the LAST thing in the file, so
+# anchor it to the end. The previous unanchored pattern was applied to the whole
+# document and deleted the line from any entry whose text happened to contain
+# that sentence -- silent loss of user/job data.
 _TRIM_NOTE_RE = re.compile(
-    r"\n*\(inbox trimmed to the newest \d+ entries; older ones were dropped\)\n*")
+    r"(?:\n*\(inbox trimmed to the newest \d+ entries; "
+    r"older ones were dropped\)\n*$)")
 
 
 def _trim_inbox(max_bytes: int = 200_000) -> None:

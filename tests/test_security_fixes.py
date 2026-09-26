@@ -81,14 +81,14 @@ class TestUnattendedSlashAllowlist(unittest.TestCase):
 
     def test_acp_tool_cannot_register_agents(self):
         """The `acp` tool has no command/args channel, so agent="add" must not
-        register anything — it falls through to "unknown agent"."""
+        register anything."""
         from buddy_core.tools import tool_impl
         from buddy_core.config import CONFIG
-        with tempfile.TemporaryDirectory() as td:
-            out = tool_impl("acp", {"agent": "add", "prompt": "pwn"}, None)
-            self.assertIn("unknown ACP agent", out)
-            saved = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
-            self.assertEqual(saved.get("acp_agents") or {}, {})
+        out = tool_impl("acp", {"agent": "add", "prompt": "pwn"}, None)
+        self.assertNotIn("configured", out)
+        saved = json.loads(CONFIG.read_text()) if CONFIG.exists() else {}
+        self.assertEqual(saved.get("acp_agents") or {}, {})
+
 
     def test_read_only_commands_still_work_unattended(self):
         for cmd, needle in (("/status", "brain="), ("/help", "commands:"),
@@ -104,6 +104,136 @@ class TestUnattendedSlashAllowlist(unittest.TestCase):
         # any dispatcher branch not in either set is unreachable from the model
         self.assertIn("/model", _UNATTENDED_GATED)
 
+
+class TestToolDispatchGates(unittest.TestCase):
+    """The slash allowlist was the headline fix, but the same primitives stayed
+    reachable through _tool_impl — a second door. Each test here reproduces the
+    tool-level bypass, not the (already covered) slash-level one."""
+
+    def _cfg_with_agent(self, td, name="evil"):
+        p = Path(td) / ".buddy" / "config.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"acp_agents": {name: {
+            "command": "/usr/bin/touch", "args": [str(Path(td) / "PWNED")]}}}))
+        return p
+
+    def test_acp_tool_cannot_spawn_an_agent_unattended(self):
+        """H1: acp_tool -> run_acp_agent -> Popen([command]+args). The slash path
+        was allowlisted, but the tool dispatch was ungated, so a prompt
+        injection could drive any configured agent with no confirmation."""
+        from unittest import mock
+        from buddy_core import config as cfgmod
+        from buddy_core.tools import tool_impl
+        with tempfile.TemporaryDirectory() as td:
+            self._cfg_with_agent(td)
+            old_cfg, old_home = cfgmod.CONFIG, cfgmod.HOME
+            cfgmod.CONFIG = Path(td) / ".buddy" / "config.json"
+            try:
+                with mock.patch.dict(os.environ, {"HOME": td}), \
+                     mock.patch("buddy_core.config.Path.home", return_value=Path(td)):
+                    out = tool_impl("acp", {"agent": "evil", "prompt": "x"}, None)
+                self.assertIn("needs a human", out)
+                self.assertFalse((Path(td) / "PWNED").exists(),
+                                 "ACP agent spawned without confirmation")
+            finally:
+                cfgmod.CONFIG, cfgmod.HOME = old_cfg, old_home
+
+    def test_codex_tool_is_gated(self):
+        """H2: codex_run is subprocess.run(["codex","exec",task]) with no
+        blocklist and no confirm."""
+        from buddy_core.tools import tool_impl
+        out = tool_impl("codex", {"task": "rm -rf /"}, None)
+        self.assertIn("needs a human", out)
+
+    def test_publish_site_confirm_is_forwarded(self):
+        """M1: the gate existed inside publish_site but the only model-reachable
+        call site dropped `confirm`, so it could never fire."""
+        from unittest import mock
+        from buddy_core import tools as tm
+        with tempfile.TemporaryDirectory() as td:
+            old = tm.WORKSPACE
+            tm.WORKSPACE = Path(td)
+            try:
+                with mock.patch.object(tm, "publish_site",
+                                       wraps=tm.publish_site) as sp:
+                    tm.tool_impl("publish_site",
+                                 {"filename": "a.html", "html": "<p>a</p>"}, None)
+                self.assertIsNotNone(sp.call_args)
+                self.assertIn("confirm", sp.call_args.kwargs,
+                              "confirm was not forwarded to publish_site")
+            finally:
+                tm.WORKSPACE = old
+
+    def test_open_url_is_gated(self):
+        """L5: xdg-open on a model-controlled argument, no confirm."""
+        from unittest import mock
+        from buddy_core import tools as tm
+        with mock.patch.object(tm.subprocess, "run") as sp:
+            out = tm.tool_impl("open_url", {"target": "file:///etc/passwd"}, None)
+            sp.assert_not_called()
+        self.assertIn("needs a human", out)
+
+    def test_browse_blocks_non_public_hosts(self):
+        """H3: the Playwright branch never called web_fetch/_net_open, so it
+        bypassed the SSRF guard entirely once playwright was installed."""
+        from buddy_core.tools import browse
+        for u in ("http://127.0.0.1:8080/admin",
+                  "http://169.254.169.254/latest/meta-data/",
+                  "http://192.168.1.1/"):
+            with self.subTest(u=u):
+                out = browse(u)
+                self.assertIn("refused", out.lower(), out)
+                self.assertNotIn("latest/meta-data\n", out)
+
+    def test_doctor_returns_text_not_none(self):
+        """doctor() was `-> None`, so `return doctor()` handed the model a
+        literal None. The allowlist masked that instead of fixing it."""
+        from unittest import mock
+        import io
+        from buddy_core import commands as cm
+        buf = io.StringIO()
+        with mock.patch.object(sys, "stdout", buf):
+            out = cm.doctor()
+        self.assertIsInstance(out, str)
+        self.assertIn("buddy doctor", out)
+
+    def test_doctor_is_reachable_unattended(self):
+        from buddy_core.commands import run_slash_command, _UNATTENDED_SAFE
+        self.assertIn("/doctor", _UNATTENDED_SAFE)
+
+    def test_fix_and_evolve_are_not_unattended(self):
+        """M4/M5: both were classified as self-gating, but /fix spawns the test
+        runner (repeatably — its cooldown is bypassed by any `issue`) and
+        /evolve writes playbook.md + skills/*.md, which are re-injected into
+        every later session."""
+        from buddy_core.commands import run_slash_command, _UNATTENDED_GATED
+        from buddy_core.config import load_config_safe
+        self.assertNotIn("/fix", _UNATTENDED_GATED)
+        self.assertNotIn("/evolve", _UNATTENDED_GATED)
+        cfg = load_config_safe()
+        self.assertIn("needs a human", run_slash_command(cfg, "/fix"))
+        self.assertIn("needs a human", run_slash_command(cfg, "/evolve"))
+
+    def test_self_repair_refuses_unattended(self):
+        from buddy_core.skills import self_repair
+        out = self_repair({}, None, confirm=None, issue="something")
+        self.assertIn("needs a human", out)
+
+    def test_evolve_pass_refuses_unattended(self):
+        from buddy_core.skills import evolve_pass
+        self.assertIn("needs a human", evolve_pass({}, None, confirm=None))
+
+    def test_all_daemon_loops_catch_baseexception(self):
+        """M6: the patch hardened 3 of 6. AutoEvolve, AutoUpgrade and
+        ErrorReaper are started by the same entry point and all reach
+        load_config(), which sys.exit(1)s on a corrupt config."""
+        import inspect
+        from buddy_core import sched, skills
+        for cls in (sched.Scheduler, sched.Watcher, sched.TelegramBot,
+                    skills.AutoEvolve, skills.AutoUpgrade, skills.ErrorReaper):
+            src = inspect.getsource(cls._loop)
+            self.assertIn("except BaseException", src,
+                          f"{cls.__name__}._loop can still be killed by SystemExit")
 
 class TestCommandWatcherGate(unittest.TestCase):
     """sched.py add_watcher had no confirm parameter at all: a `command`
@@ -356,7 +486,6 @@ class TestAmbientNotifyGate(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             old = util.INBOX
             util.INBOX = Path(td) / "inbox.md"
-            os.environ["BUDDY_NO_AMBIENT_NOTIFY"] = "1"
             try:
                 with _env(BUDDY_NO_AMBIENT_NOTIFY="1"):
                     util.deliver("hello", "t")
@@ -435,6 +564,16 @@ class TestBuddyHomeOverride(unittest.TestCase):
         self.assertEqual(os.environ.get("BUDDY_NO_AMBIENT_NOTIFY"), "1")
         self.assertTrue(os.environ.get("BUDDY_HOME", "").startswith(
             tempfile.gettempdir()))
+        # and _hermetic must not defer to a pre-existing value
+        with _env(BUDDY_HOME=os.environ.get("BUDDY_HOME", "")):
+            import importlib
+            spec = importlib.util.spec_from_file_location(
+                "_hermetic_probe",
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), "_hermetic.py"))
+            mod = importlib.util.module_from_spec(spec)
+            with _env(BUDDY_HOME="/home/graile/.buddy"):
+                spec.loader.exec_module(mod)
+            self.assertNotEqual(os.environ["BUDDY_HOME"], "/home/graile/.buddy")
 
 
 class TestRunCommandTimeoutIsEnforced(unittest.TestCase):
@@ -572,6 +711,31 @@ class TestDeadConfirmParams(unittest.TestCase):
             out = cm.auto_install(["vim"], info, confirm=lambda _a: False)
         self.assertEqual(out, [])
         sp.assert_not_called()
+
+
+class TestVersionConsistency(unittest.TestCase):
+    """pyproject, BUDDY_VERSION and the CHANGELOG disagreed (4.3.0 / v3 / 4.3.1),
+    so the published release claimed a version the code did not have."""
+
+    def test_pyproject_matches_buddy_version(self):
+        import re
+        from buddy_core.config import BUDDY_VERSION
+        txt = (Path(__file__).resolve().parent.parent / "pyproject.toml").read_text()
+        m = re.search(r'^version\s*=\s*"([^"]+)"', txt, re.M)
+        self.assertIsNotNone(m, "no version in pyproject.toml")
+        self.assertEqual(m.group(1), BUDDY_VERSION,
+                         f"pyproject {m.group(1)} != BUDDY_VERSION {BUDDY_VERSION}")
+
+    def test_changelog_top_matches(self):
+        txt = (Path(__file__).resolve().parent.parent / "CHANGELOG.md").read_text()
+        heads = [l for l in txt.splitlines() if l.startswith("## [")]
+        self.assertTrue(heads, "no changelog headings")
+        top = heads[0]
+        self.assertNotIn("Unreleased", top,
+                         "release committed: CHANGELOG still says [Unreleased]")
+        import re
+        from buddy_core.config import BUDDY_VERSION
+        self.assertIn(BUDDY_VERSION, top, f"changelog top {top!r} != {BUDDY_VERSION}")
 
 
 class TestInboxTrimNoteShape(unittest.TestCase):

@@ -239,7 +239,17 @@ def _log_wish(note: str) -> None:
 
 # ---- original buddy.py lines 2443-2467 --------------------------------
 def evolve_pass(cfg: dict, mcp: "MCPManager", confirm=None) -> str:
-    """One self-improvement cycle: review yourself, make one real improvement."""
+    """One self-improvement cycle: review yourself, make one real improvement.
+
+    Writes playbook.md and skills/*.md, both of which are re-injected into the
+    system prompt on every later session — so an unattended cycle is a durable
+    prompt-injection foothold, not just a one-shot edit. Human-only for that
+    reason; the daemon calls this with TRUSTED_CONFIRM.
+    """
+    if confirm is None:
+        return ("(a self-evolution cycle rewrites the playbook and skills that "
+                "feed every future session — that needs a human. Ask them to "
+                "run `/evolve` themselves.)")
     wishes = ""
     try:
         wpath = HOME / "wishes.log"
@@ -295,7 +305,10 @@ class AutoEvolve:
                 note = evolve_pass(self.cfg, self.mcp, confirm=None)
                 note = _cage_autonomous_edits(note)
                 deliver(f"auto-evolve cycle:\n{note}", title="self-improvement")
-            except Exception as e:
+            except BaseException as e:
+                # BaseException: load_config()'s sys.exit(1) is not an Exception,
+                # so a corrupt config.json silently killed this thread with no
+                # log line — same defect patched in sched.py's loops.
                 _log_error("auto-evolve failed:\n" + traceback.format_exc())
                 try:
                     deliver(f"(auto-evolve failed: {e})", title="self-improvement")
@@ -329,7 +342,8 @@ class AutoUpgrade:
                 res = self_update()
                 if "updated" in res.lower() and "file(s)" in res.lower():
                     deliver(f"auto-upgrade cycle:\n{res}", title="code upgrade")
-            except Exception as e:
+            except BaseException as e:
+                # see AutoEvolve._loop: sys.exit from load_config must not be fatal
                 _log_error("auto-upgrade failed:\n" + traceback.format_exc())
 
 
@@ -354,6 +368,15 @@ def self_repair(cfg: dict, mcp=None, confirm=None, issue: str = "") -> str:
     Buddy's own source via ast-guarded code_edit, runs verification tests,
     and hot-reloads the module."""
     from .config import BUDDY_SRC
+    # Unattended (tool path): a repair cycle spawns the test runner, does a full
+    # AST scan and burns a whole LLM turn — and the 600s cooldown below is
+    # bypassed by passing any non-empty `issue`, so the model could force one per
+    # tool call. Only TRUSTED_CONFIRM callers (the daemon's ErrorReaper) may run
+    # it without a human in the loop.
+    if confirm is None:
+        return ("(a repair cycle runs the test suite and edits buddy's own "
+                "source — that needs a human. Ask them to run `/fix` "
+                "themselves, or wait for the automatic repair.)")
     with _REPAIR_LOCK:
         path = HOME / "errors.log"
         raw_recent = path.read_text(encoding="utf-8", errors="replace")[-6000:] if path.exists() else ""
@@ -567,7 +590,8 @@ class ErrorReaper:
                     # while cooling down, DON'T advance `seen`: errors arriving
                     # during the cooldown must still trigger the next repair
                     seen = size
-            except Exception:
+            except BaseException:
+                # see AutoEvolve._loop: sys.exit from load_config must not be fatal
                 _log_error("error reaper failed:\n" + traceback.format_exc())
 
 # ---- original buddy.py lines 2699-2700 --------------------------------

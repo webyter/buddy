@@ -129,7 +129,11 @@ UPDATE_FILES = [
 
 
 # ---- original buddy.py lines 255-255 ----------------------------------
-BUDDY_VERSION = "v3"
+# Keep in sync with pyproject.toml's version. This was hardcoded "v3" while the
+# project was at 4.3.x, so the TUI banner lied about the version, and the
+# published commit/changelog/pyproject disagreed with each other. test_version_
+# consistency in tests/test_security_fixes.py now fails if they drift again.
+BUDDY_VERSION = "4.3.1"
 
 # ---- original buddy.py lines 722-724 ----------------------------------
 

@@ -18,5 +18,9 @@ if someone runs a test module directly with `python3 tests/test_foo.py`.
 import os
 import tempfile
 
-os.environ.setdefault("BUDDY_NO_AMBIENT_NOTIFY", "1")
-os.environ.setdefault("BUDDY_HOME", tempfile.mkdtemp(prefix="buddy-test-"))
+# Unconditional, NOT setdefault: if the developer already has BUDDY_HOME (or has
+# switched the notify gate off) exported, setdefault would adopt those values and
+# the suite would write into their real ~/.buddy again -- the exact bug this
+# module exists to prevent. The suite must win.
+os.environ["BUDDY_NO_AMBIENT_NOTIFY"] = "1"
+os.environ["BUDDY_HOME"] = tempfile.mkdtemp(prefix="buddy-test-")

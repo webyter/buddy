@@ -148,18 +148,13 @@ class MCPServer:
         except (OSError, ValueError):
             pass
         finally:
-            # close the child's pipes before dropping the reference (see
-            # shutdown): dropping self.proc alone leaked the stdin/stdout
-            # wrappers and produced ResourceWarnings on every kill.
-            if self.proc is not None:
-                for _pipe in (getattr(self.proc, 'stdin', None),
-                              getattr(self.proc, 'stdout', None),
-                              getattr(self.proc, 'stderr', None)):
-                    try:
-                        if _pipe is not None and not _pipe.closed:
-                            _pipe.close()
-                    except (OSError, ValueError):
-                        pass
+            # stdin only — see shutdown() for why stdout must not be closed here
+            try:
+                if self.proc is not None and self.proc.stdin is not None \
+                        and not self.proc.stdin.closed:
+                    self.proc.stdin.close()
+            except (OSError, ValueError):
+                pass
             self.proc = None
             if self._log_file:
                 try:
@@ -232,18 +227,19 @@ class MCPServer:
                 except (OSError, subprocess.TimeoutExpired):
                     pass
             finally:
-                # Close the pipes before dropping the reference. Setting
-                # self.proc = None alone leaked the child's stdin/stdout text
-                # wrappers — visible as "ResourceWarning: unclosed file
-                # name=5/name=6" from this line on every shutdown.
-                for _pipe in (getattr(proc, 'stdin', None),
-                              getattr(proc, 'stdout', None),
-                              getattr(proc, 'stderr', None)):
-                    try:
-                        if _pipe is not None and not _pipe.closed:
-                            _pipe.close()
-                    except (OSError, ValueError):
-                        pass
+                # Close ONLY stdin here. Do NOT close stdout: the reader thread
+                # may be parked in read() on it, and TextIOWrapper.close()
+                # blocks until that read returns — which never happens while a
+                # grandchild still holds the pipe's write end. An earlier patch
+                # closed stdout here and turned a benign ResourceWarning into a
+                # measured 120s shutdown hang (and, in _mark_dead, a hang while
+                # self._lock is held, stalling every later tools/call).
+                # stdout is released with the process object; the reader owns it.
+                try:
+                    if proc.stdin is not None and not proc.stdin.closed:
+                        proc.stdin.close()
+                except (OSError, ValueError):
+                    pass
                 self.proc = None
                 if self._log_file:
                     try:

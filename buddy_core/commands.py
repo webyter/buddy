@@ -577,10 +577,16 @@ _UNATTENDED_SAFE = frozenset({
     # read-only observability: no process spawn, no config write, no egress
     "/status", "/quota", "/memory", "/inbox", "/jobs", "/skills", "/tools",
     "/service", "/introspect", "/self", "/playbook", "/help", "/say",
-    "/clear", "/web",  # /web masks the bearer token when confirm is None
+    "/clear", "/web", "/doctor",  # read-only; /web masks the token when None
 })
 # Carry their own internal confirm gate; safe to reach, they re-check.
-_UNATTENDED_GATED = frozenset({"/model", "/fix", "/evolve"})
+# NOTE: /fix and /evolve are deliberately NOT here. Both were assumed to
+# re-check, but they did not: /fix spawns the test runner and can be forced
+# repeatedly (its cooldown is bypassed by any non-empty `issue`), and /evolve
+# writes playbook.md + skills/*.md, which are re-injected into the system
+# prompt every later session — a durable prompt-injection foothold. Both now
+# early-return on confirm is None, so they are refused here as well.
+_UNATTENDED_GATED = frozenset({"/model"})
 
 
 def run_slash_command(cfg: dict, raw: str, confirm=None) -> str:
@@ -844,8 +850,12 @@ def run_slash_command(cfg: dict, raw: str, confirm=None) -> str:
                 "\n  • view tools: /tools")
     if cmd == "/say":
         return f"voice mode: {cfg.get('tts', 'off')} (set with /say off|api|espeak)"
-    return ("(command not allowed for me: "
-            f"{raw!r} — allowed: /help /status /memory /inbox /jobs /skills /tools /model /acp /service /web /introspect /theme /fix /upgrade /evolve /clear /doctor /playbook /wish /say)")
+    # Interactive path only: an unrecognised command typed by the user. Keep
+    # this list in sync with _UNATTENDED_SAFE, which is the stricter set.
+    return ("(unknown command: "
+            f"{raw!r} — try /help, or one of: /status /memory /inbox /jobs /skills "
+            "/tools /model /acp /service /web /introspect /doctor /theme /fix "
+            "/upgrade /evolve /clear /playbook /wish /say /quota")
 
 # ---- original buddy.py lines 3188-3191 --------------------------------
 
@@ -1241,7 +1251,15 @@ def first_run() -> dict:
 
 
 # ---- original buddy.py lines 4771-4791 --------------------------------
-def doctor() -> None:
+def doctor() -> str:
+    """Health check. Read-only: it inspects config, probes the system and makes
+    one API call, and starts nothing.
+
+    Returns the same text it prints. It used to be `-> None` with no return,
+    which meant the model-reachable `return doctor()` in run_slash_command
+    handed the LLM a literal None — the allowlist change turned that into a
+    refusal, which masked the bug rather than fixing it.
+    """
     cfg = load_config()
     checks = []
     checks.append(("config", bool(cfg.get("api_base") and cfg.get("model"))))
@@ -1277,11 +1295,13 @@ def doctor() -> None:
     checks.append(("screenshot (grim/scrot/gnome)", any(tools.get(t) for t in ("grim", "scrot", "gnome-screenshot"))))
     checks.append(("clipboard (xclip/wl)", any(tools.get(t) for t in ("xclip", "wl-copy", "wl-paste"))))
     checks.append(("desktop (xdg-open)", bool(tools.get("xclip") or tools.get("scrot") or os.environ.get("DISPLAY"))))
-    print("buddy doctor:")
-    for name, ok in checks:
-        print(f"  [{'ok' if ok else 'MISSING'}] {name}")
-    print(f"  [..] API connection: {_api_check(cfg)}")
-    print(f"  daemon: {'running' if daemon_running() else 'not running (python3 buddy.py serve)'}")
+    lines = ["buddy doctor:"]
+    lines += [f"  [{'ok' if ok else 'MISSING'}] {name}" for name, ok in checks]
+    lines.append(f"  [..] API connection: {_api_check(cfg)}")
+    lines.append(f"  daemon: {'running' if daemon_running() else 'not running (python3 buddy.py serve)'}")
+    out = "\n".join(lines)
+    print(out)
+    return out
 
 # ---- original buddy.py lines 4853-4854 --------------------------------
 
